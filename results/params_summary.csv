@@ -1,0 +1,13 @@
+signal,prominence,peaks_count,breathing_rate_bpm
+acc_x_filtered,1.0,8,10.31
+acc_x_filtered,2.0,7,9.02
+acc_x_filtered,3.0,4,5.16
+acc_x_filtered,4.0,3,3.87
+acc_y_filtered,1.0,9,11.6
+acc_y_filtered,2.0,9,11.6
+acc_y_filtered,3.0,8,10.31
+acc_y_filtered,4.0,8,10.31
+acc_z_filtered,1.0,9,11.6
+acc_z_filtered,2.0,9,11.6
+acc_z_filtered,3.0,8,10.31
+acc_z_filtered,4.0,8,10.31

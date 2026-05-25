@@ -1,0 +1,2 @@
+signal,min_distance_seconds,prominence,duration_seconds,peaks_count,breathing_rate_bpm
+acc_y_filtered,2.0,2.0,46.54,9,11.6
