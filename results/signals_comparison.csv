@@ -1,5 +1,0 @@
-signal,min_distance_seconds,prominence,peaks_count,duration_seconds,breathing_rate_bpm
-acc_y_filtered,2.0,2.0,9,46.54,11.6
-acc_z_filtered,2.0,2.0,9,46.54,11.6
-magnitude_signal,2.0,2.0,14,46.54,18.05
-pca_component,2.0,2.0,9,46.54,11.6

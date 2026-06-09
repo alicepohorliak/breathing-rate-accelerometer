@@ -428,71 +428,198 @@ def compare_peak_params(filtered_df, fs, min_distance_values, prominence_values)
     return results_df
 
 
-# Обчислення комбінованих сигналів
-def add_combined_signals(filtered_df):
-    combined_df = filtered_df.copy()
+# Зчитування додаткового датасету
+def read_external_dataset(input_file):
+    """
+    Зчитування CSV-файлу з додатковим акселерометричним датасетом.
+    Очікувані колонки: seconds, data.
+    Якщо заголовків немає, файл читається як дві колонки.
+    """
 
-    acc_x = combined_df["acc_x_filtered"].to_numpy()
-    acc_y = combined_df["acc_y_filtered"].to_numpy()
-    acc_z = combined_df["acc_z_filtered"].to_numpy()
+    df = pd.read_csv(input_file)
 
-    magnitude_signal = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
+    if "seconds" in df.columns and "data" in df.columns:
+        df = df[["seconds", "data"]].copy()
+    else:
+        df = pd.read_csv(input_file, header=None, names=["seconds", "data"])
 
-    X = np.column_stack([acc_x, acc_y, acc_z])
-    X_centered = X - X.mean(axis=0)
+    df["seconds"] = pd.to_numeric(df["seconds"], errors="coerce")
+    df["data"] = pd.to_numeric(df["data"], errors="coerce")
 
-    _, _, Vt = np.linalg.svd(X_centered, full_matrices=False)
-    pca_component = X_centered @ Vt[0]
+    df = df.dropna(subset=["seconds", "data"])
+    df = df.sort_values("seconds")
+    df = df.drop_duplicates(subset=["seconds"])
 
-    correlation = np.corrcoef(pca_component, acc_y)[0, 1]
+    df["seconds"] = df["seconds"] - df["seconds"].iloc[0]
 
-    if correlation < 0:
-        pca_component = -pca_component
-
-    combined_df["magnitude_signal"] = magnitude_signal
-    combined_df["pca_component"] = pca_component
-
-    return combined_df
+    return df.reset_index(drop=True)
 
 
-# Порівняння окремих і комбінованих сигналів
-def compare_signal_types(combined_df, fs, min_distance_seconds, prominence_value):
-    duration_seconds = combined_df["time_s"].iloc[-1] - combined_df["time_s"].iloc[0]
+# Оцінка початкової частоти дискретизації
+def estimate_sampling_frequency(time_values):
+    time_diff = np.diff(time_values)
+    mean_dt = np.mean(time_diff)
+
+    if mean_dt <= 0:
+        return 0
+
+    return 1 / mean_dt
+
+
+# Центрування одновимірного сигналу
+def center_single_signal(signal):
+    return signal - np.mean(signal)
+
+
+# Ресемплінг одновимірного сигналу
+def resample_single_signal(time_values, signal, target_fs):
+    duration_seconds = time_values[-1] - time_values[0]
+
+    new_time = np.arange(0, duration_seconds, 1 / target_fs)
+    new_signal = np.interp(new_time, time_values, signal)
+
+    return new_time, new_signal
+
+
+# Адаптивний підбір prominence для різних датасетів
+def calculate_adaptive_prominence(filtered_signal):
+    """
+    Для додаткових датасетів prominence підбирається адаптивно,
+    тому що ці файли мають інший масштаб сигналу, ніж основний запис.
+    """
+
+    signal_std = np.std(filtered_signal)
+    signal_range = np.percentile(filtered_signal, 95) - np.percentile(filtered_signal, 5)
+
+    prominence_value = max(signal_std * 0.45, signal_range * 0.12)
+
+    return prominence_value
+
+
+# Короткий опис датасету
+def dataset_comment(dataset_name):
+    comments = {
+        "Нормальне дихання": "Регулярний запис із помірною частотою дихання",
+        "Повільне дихання": "Запис із меншою кількістю дихальних циклів за хвилину",
+        "Кашель / артефакти": "Запис із різкими коливаннями, які можуть впливати на пошук піків"
+    }
+
+    return comments.get(dataset_name, "")
+
+
+# Обробка одного додаткового датасету
+def process_external_dataset(dataset_name, file_name, target_fs, lowcut, highcut, order, min_distance_seconds):
+    input_file = Path("data") / file_name
+
+    if not input_file.exists():
+        return None
+
+    df = read_external_dataset(input_file)
+
+    time_values = df["seconds"].to_numpy()
+    raw_signal = df["data"].to_numpy()
+
+    rows_count = len(df)
+    duration_seconds = time_values[-1] - time_values[0]
     duration_minutes = duration_seconds / 60
+    original_fs = estimate_sampling_frequency(time_values)
 
-    distance_samples = int(min_distance_seconds * fs)
+    centered_signal = center_single_signal(raw_signal)
 
-    signals = {
-        "acc_y_filtered": combined_df["acc_y_filtered"],
-        "acc_z_filtered": combined_df["acc_z_filtered"],
-        "magnitude_signal": combined_df["magnitude_signal"],
-        "pca_component": combined_df["pca_component"]
+    resampled_time, resampled_signal = resample_single_signal(
+        time_values,
+        centered_signal,
+        target_fs
+    )
+
+    filtered_signal = butter_bandpass_filter(
+        resampled_signal,
+        target_fs,
+        lowcut,
+        highcut,
+        order
+    )
+
+    distance_samples = int(min_distance_seconds * target_fs)
+    prominence_value = calculate_adaptive_prominence(filtered_signal)
+
+    peaks, _ = find_peaks(
+        filtered_signal,
+        distance=distance_samples,
+        prominence=prominence_value
+    )
+
+    peaks_count = len(peaks)
+
+    if duration_minutes > 0:
+        breathing_rate = peaks_count / duration_minutes
+    else:
+        breathing_rate = 0
+
+    return {
+        "dataset": dataset_name,
+        "file": file_name,
+        "rows_count": rows_count,
+        "duration_seconds": round(duration_seconds, 2),
+        "original_fs_hz": round(original_fs, 2),
+        "resampled_fs_hz": target_fs,
+        "prominence": round(prominence_value, 4),
+        "peaks_count": peaks_count,
+        "breathing_rate_bpm": round(breathing_rate, 2),
+        "comment": dataset_comment(dataset_name),
+        "time": resampled_time,
+        "filtered_signal": filtered_signal,
+        "peaks": peaks
+    }
+
+
+# Порівняння різних датасетів
+def compare_external_datasets(target_fs, lowcut, highcut, order, min_distance_seconds):
+    datasets = {
+        "Нормальне дихання": "acc_normal.csv",
+        "Повільне дихання": "acc_slow.csv",
+        "Кашель / артефакти": "acc_cough.csv"
     }
 
     results = []
+    processed_signals = []
 
-    for signal_name, signal in signals.items():
-        peaks, _ = find_peaks(
-            signal,
-            distance=distance_samples,
-            prominence=prominence_value
+    for dataset_name, file_name in datasets.items():
+        result = process_external_dataset(
+            dataset_name,
+            file_name,
+            target_fs,
+            lowcut,
+            highcut,
+            order,
+            min_distance_seconds
         )
 
-        peaks_count = len(peaks)
-        breathing_rate = peaks_count / duration_minutes
+        if result is not None:
+            results.append({
+                "dataset": result["dataset"],
+                "file": result["file"],
+                "rows_count": result["rows_count"],
+                "duration_seconds": result["duration_seconds"],
+                "original_fs_hz": result["original_fs_hz"],
+                "resampled_fs_hz": result["resampled_fs_hz"],
+                "prominence": result["prominence"],
+                "peaks_count": result["peaks_count"],
+                "breathing_rate_bpm": result["breathing_rate_bpm"],
+                "comment": result["comment"]
+            })
 
-        results.append({
-            "signal": signal_name,
-            "min_distance_seconds": min_distance_seconds,
-            "prominence": prominence_value,
-            "peaks_count": peaks_count,
-            "duration_seconds": round(duration_seconds, 2),
-            "breathing_rate_bpm": round(breathing_rate, 2)
-        })
+            processed_signals.append({
+                "dataset": result["dataset"],
+                "time": result["time"],
+                "filtered_signal": result["filtered_signal"],
+                "peaks": result["peaks"],
+                "breathing_rate": result["breathing_rate_bpm"]
+            })
 
     results_df = pd.DataFrame(results)
 
-    return results_df, combined_df
+    return results_df, processed_signals
 
 
 # Заголовок сторінки
@@ -1225,153 +1352,38 @@ else:
                     "які розташовані занадто близько один до одного."
                 )
 
-                # Порівняння окремих і комбінованих сигналів
+                # Фінальний результат для основного запису
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
                 st.markdown(
                     """
                     <div class="step-label">Етап 08</div>
-                    <div class="step-title">Порівняння окремих і комбінованих сигналів</div>
+                    <div class="step-title">Фінальний результат для основного запису</div>
                     <div class="step-description">
-                        На цьому етапі порівнюються окремі відфільтровані осі акселерометра
-                        та комбіновані сигнали. Це допомагає вибрати сигнал, який дає
-                        найбільш стабільний результат для фінального підрахунку дихальних циклів.
+                        На цьому етапі фіксується підсумковий результат для основного запису.
+                        Для фінального розрахунку використовується сигнал acc_y_filtered
+                        з параметрами min_distance = 2,0 с та prominence = 2,0.
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
 
-                combined_df = add_combined_signals(filtered_df)
+                final_signal_column = "acc_y_filtered"
+                final_min_distance = 2.0
+                final_prominence = 2.0
 
-                signal_comparison_df, combined_df = compare_signal_types(
-                    combined_df,
-                    target_fs,
-                    min_distance_seconds,
-                    prominence_value
-                )
+                final_time = filtered_df["time_s"]
+                final_signal = filtered_df[final_signal_column]
 
-                selected_final_signal = "pca_component"
-                selected_row = signal_comparison_df[
-                    signal_comparison_df["signal"] == selected_final_signal
-                ].iloc[0]
-
-                col1, col2, col3 = st.columns(3)
-
-                with col1:
-                    compact_metric_card(
-                        "Параметри пошуку",
-                        f"min_distance: {min_distance_seconds:.1f} с / prominence: {prominence_value:.1f}"
-                    )
-                with col2:
-                    compact_metric_card("Обраний для фіналу", selected_final_signal)
-                with col3:
-                    compact_metric_card(
-                        "Результат PCA",
-                        f"{selected_row['breathing_rate_bpm']:.2f} дих./хв"
-                    )
-
-                st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
-
-                fig_signals, ax_signals = plt.subplots(figsize=(12, 5))
-
-                bar_colors = ["#60a5fa", "#38bdf8", "#22c55e", "#86efac"]
-
-                ax_signals.bar(
-                    signal_comparison_df["signal"],
-                    signal_comparison_df["breathing_rate_bpm"],
-                    color=bar_colors
-                )
-
-                max_rate = signal_comparison_df["breathing_rate_bpm"].max()
-
-                ax_signals.set_title("Порівняння частоти дихання для різних типів сигналу")
-                ax_signals.set_xlabel("Тип сигналу")
-                ax_signals.set_ylabel("Частота дихання, дих./хв")
-                ax_signals.set_ylim(0, max_rate * 1.12)
-                ax_signals.grid(axis="y")
-                fig_signals.tight_layout()
-
-                st.pyplot(fig_signals)
-
-                st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-                st.markdown(
-                    '<div class="section-title-small">Короткий результат порівняння</div>',
-                    unsafe_allow_html=True
-                )
-
-                result_cols = st.columns(4)
-
-                for index, (_, row) in enumerate(signal_comparison_df.iterrows()):
-                    with result_cols[index]:
-                        compact_metric_card(
-                            row["signal"],
-                            f"{int(row['peaks_count'])} піків · {row['breathing_rate_bpm']:.2f} дих./хв"
-                        )
-
-                st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
-
-                with st.expander("Показати фрагмент даних з комбінованими сигналами"):
-                    dataframe_to_custom_table(
-                        combined_df[
-                            [
-                                "time_s",
-                                "acc_y_filtered",
-                                "acc_z_filtered",
-                                "magnitude_signal",
-                                "pca_component"
-                            ]
-                        ],
-                        columns=[
-                            "time_s",
-                            "acc_y_filtered",
-                            "acc_z_filtered",
-                            "magnitude_signal",
-                            "pca_component"
-                        ],
-                        formatters={
-                            "time_s": lambda v: f"{float(v):.2f}",
-                            "acc_y_filtered": lambda v: f"{float(v):.4f}",
-                            "acc_z_filtered": lambda v: f"{float(v):.4f}",
-                            "magnitude_signal": lambda v: f"{float(v):.4f}",
-                            "pca_component": lambda v: f"{float(v):.4f}",
-                        },
-                        max_rows=10
-                    )
-
-                green_status(
-                    "У цьому записі acc_y_filtered, acc_z_filtered та pca_component дають однаковий стабільний результат, "
-                    "а magnitude_signal визначає більше піків і завищує частоту дихання. Тому для фінального етапу "
-                    "обрано pca_component: він враховує інформацію з трьох осей, але не підсилює зайві коливання."
-                )
-
-                # Фінальний результат алгоритму
-                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                st.markdown(
-                    """
-                    <div class="step-label">Етап 09</div>
-                    <div class="step-title">Фінальний результат алгоритму</div>
-                    <div class="step-description">
-                        На цьому етапі для фінального аналізу використовується PCA-компонента.
-                        На її основі виконується пошук піків і розраховується остаточна частота дихання.
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-                final_signal_column = "pca_component"
-
-                final_time = combined_df["time_s"]
-                final_signal = combined_df[final_signal_column]
-
-                final_distance_samples = int(min_distance_seconds * target_fs)
+                final_distance_samples = int(final_min_distance * target_fs)
 
                 final_peaks, final_properties = find_peaks(
                     final_signal,
                     distance=final_distance_samples,
-                    prominence=prominence_value
+                    prominence=final_prominence
                 )
 
                 final_peaks_count = len(final_peaks)
-                final_duration_seconds = combined_df["time_s"].iloc[-1] - combined_df["time_s"].iloc[0]
+                final_duration_seconds = filtered_df["time_s"].iloc[-1] - filtered_df["time_s"].iloc[0]
                 final_duration_minutes = final_duration_seconds / 60
 
                 if final_duration_minutes > 0:
@@ -1402,9 +1414,9 @@ else:
                 with col4:
                     compact_metric_card("Тривалість запису", f"{final_duration_seconds:.2f} с")
                 with col5:
-                    compact_metric_card("Мінімальна відстань", f"{min_distance_seconds:.1f} с")
+                    compact_metric_card("Мінімальна відстань", f"{final_min_distance:.1f} с")
                 with col6:
-                    compact_metric_card("Prominence", f"{prominence_value:.1f}")
+                    compact_metric_card("Prominence", f"{final_prominence:.1f}")
 
                 st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
 
@@ -1413,7 +1425,7 @@ else:
                 ax_final.plot(
                     final_time,
                     final_signal,
-                    label="PCA component",
+                    label=final_signal_column,
                     linewidth=1.5
                 )
 
@@ -1425,9 +1437,9 @@ else:
                     zorder=3
                 )
 
-                ax_final.set_title("Фінальний результат пошуку піків на PCA-компоненті")
+                ax_final.set_title("Результат пошуку піків для основного запису")
                 ax_final.set_xlabel("Час, с")
-                ax_final.set_ylabel("Амплітуда PCA-компоненти")
+                ax_final.set_ylabel("Амплітуда після фільтрації, mg")
                 ax_final.grid(True)
                 ax_final.legend()
                 fig_final.tight_layout()
@@ -1452,10 +1464,192 @@ else:
                     )
 
                 green_status(
-                    f"Фінальний результат: для сигналу {final_signal_column} знайдено "
+                    f"Фінальний результат для основного запису: знайдено "
                     f"{final_peaks_count} піків, що відповідає частоті дихання "
                     f"{final_breathing_rate:.2f} дих./хв."
                 )
+
+                # Порівняння різних датасетів
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                st.markdown(
+                    """
+                    <div class="step-label">Етап 09</div>
+                    <div class="step-title">Порівняння різних датасетів</div>
+                    <div class="step-description">
+                        На цьому етапі той самий pipeline обробки застосовується до трьох
+                        додаткових акселерометричних записів: нормального дихання,
+                        повільного дихання та запису з кашлем або артефактами.
+                        Це дозволяє перевірити роботу алгоритму не лише на одному файлі,
+                        а й на різних типах сигналів.
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                datasets_df, processed_signals = compare_external_datasets(
+                    target_fs=target_fs,
+                    lowcut=lowcut,
+                    highcut=highcut,
+                    order=FILTER_ORDER,
+                    min_distance_seconds=2.0
+                )
+
+                if datasets_df.empty:
+                    st.warning(
+                        "Додаткові датасети не знайдено. Перевірте наявність файлів "
+                        "acc_normal.csv, acc_slow.csv та acc_cough.csv у папці data."
+                    )
+                else:
+                    col1, col2, col3 = st.columns(3)
+
+                    normal_row = datasets_df[datasets_df["dataset"] == "Нормальне дихання"].iloc[0]
+                    slow_row = datasets_df[datasets_df["dataset"] == "Повільне дихання"].iloc[0]
+                    cough_row = datasets_df[datasets_df["dataset"] == "Кашель / артефакти"].iloc[0]
+
+                    with col1:
+                        compact_metric_card(
+                            "Нормальне дихання",
+                            f"{normal_row['breathing_rate_bpm']:.2f} дих./хв"
+                        )
+
+                    with col2:
+                        compact_metric_card(
+                            "Повільне дихання",
+                            f"{slow_row['breathing_rate_bpm']:.2f} дих./хв"
+                        )
+
+                    with col3:
+                        compact_metric_card(
+                            "Кашель / артефакти",
+                            f"{cough_row['breathing_rate_bpm']:.2f} дих./хв"
+                        )
+
+                    st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
+
+                    st.markdown(
+                        '<div class="section-title-small">Таблиця порівняння датасетів</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    dataframe_to_custom_table(
+                        datasets_df,
+                        columns=[
+                            "dataset",
+                            "duration_seconds",
+                            "original_fs_hz",
+                            "prominence",
+                            "peaks_count",
+                            "breathing_rate_bpm",
+                            "comment"
+                        ],
+                        formatters={
+                            "duration_seconds": lambda v: f"{float(v):.2f}",
+                            "original_fs_hz": lambda v: f"{float(v):.2f}",
+                            "prominence": lambda v: f"{float(v):.4f}",
+                            "breathing_rate_bpm": lambda v: f"{float(v):.2f}",
+                        }
+                    )
+
+                    st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
+
+                    fig_datasets, ax_datasets = plt.subplots(figsize=(12, 5))
+
+                    bars = ax_datasets.bar(
+                        datasets_df["dataset"],
+                        datasets_df["breathing_rate_bpm"]
+                    )
+
+                    ax_datasets.set_title("Порівняння частоти дихання для різних датасетів")
+                    ax_datasets.set_xlabel("Датасет")
+                    ax_datasets.set_ylabel("Частота дихання, дих./хв")
+                    ax_datasets.grid(axis="y")
+
+                    for bar in bars:
+                        height = bar.get_height()
+
+                        ax_datasets.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            height + 0.3,
+                            f"{height:.2f}",
+                            ha="center",
+                            va="bottom"
+                        )
+
+                    fig_datasets.tight_layout()
+                    st.pyplot(fig_datasets)
+
+                    st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
+
+                    fragment_seconds = 30
+
+                    fig_overview, axes = plt.subplots(
+                        nrows=len(processed_signals),
+                        ncols=1,
+                        figsize=(12, 8),
+                        sharex=True
+                    )
+
+                    if len(processed_signals) == 1:
+                        axes = [axes]
+
+                    for ax, item in zip(axes, processed_signals):
+                        time_values = item["time"]
+                        filtered_signal = item["filtered_signal"]
+                        peaks_dataset = item["peaks"]
+                        breathing_rate_dataset = item["breathing_rate"]
+                        dataset_name = item["dataset"]
+
+                        fragment_mask = time_values <= fragment_seconds
+
+                        fragment_time = time_values[fragment_mask]
+                        fragment_signal = filtered_signal[fragment_mask]
+
+                        fragment_peak_indices = [
+                            peak for peak in peaks_dataset
+                            if time_values[peak] <= fragment_seconds
+                        ]
+
+                        ax.plot(
+                            fragment_time,
+                            fragment_signal,
+                            linewidth=2,
+                            label="Відфільтрований сигнал"
+                        )
+
+                        ax.scatter(
+                            time_values[fragment_peak_indices],
+                            filtered_signal[fragment_peak_indices],
+                            color="red",
+                            s=35,
+                            label="Знайдені піки",
+                            zorder=3
+                        )
+
+                        ax.set_title(
+                            f"{dataset_name}: {breathing_rate_dataset:.2f} дих./хв",
+                            fontsize=12
+                        )
+
+                        ax.set_ylabel("Амплітуда")
+                        ax.grid(True)
+                        ax.legend(loc="upper right")
+
+                    axes[-1].set_xlabel("Час, с")
+
+                    fig_overview.suptitle(
+                        "Фрагменти відфільтрованих сигналів для різних датасетів",
+                        fontsize=14
+                    )
+
+                    fig_overview.tight_layout(rect=[0, 0, 1, 0.95])
+                    st.pyplot(fig_overview)
+
+                    green_status(
+                        "Порівняння показує, що один і той самий pipeline обробки можна застосувати "
+                        "до різних акселерометричних записів. Для повільного дихання частота є нижчою, "
+                        "а запис із кашлем або артефактами містить різкі коливання, які можуть впливати "
+                        "на кількість знайдених піків."
+                    )
 
     except Exception as error:
         st.error("Під час зчитування або обробки файлу виникла помилка.")

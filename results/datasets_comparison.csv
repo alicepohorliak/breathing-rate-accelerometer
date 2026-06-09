@@ -1,0 +1,4 @@
+dataset,file,rows_count,duration_seconds,original_fs_hz,resampled_fs_hz,lowcut_hz,highcut_hz,min_distance_seconds,distance_samples,prominence,peaks_count,breathing_rate_bpm,comment,processed_csv
+Нормальне дихання,acc_normal.csv,7576,301.07,25.16,50.0,0.1,0.7,2.0,100,0.0214,80,15.94,Регулярний запис із помірною частотою дихання,dataset_acc_normal_processed.csv
+Повільне дихання,acc_slow.csv,7577,300.96,25.17,50.0,0.1,0.7,2.0,100,0.0126,47,9.37,Запис із меншою кількістю дихальних циклів за хвилину,dataset_acc_slow_processed.csv
+Кашель / артефакти,acc_cough.csv,3790,150.51,25.17,50.0,0.1,0.7,2.0,100,0.0263,46,18.34,"Запис із різкими коливаннями, які можуть впливати на пошук піків",dataset_acc_cough_processed.csv

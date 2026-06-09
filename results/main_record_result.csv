@@ -1,2 +1,2 @@
 selected_signal,min_distance_seconds,distance_samples,prominence,duration_seconds,peaks_count,breathing_rate_bpm
-pca_component,2.0,100,2.0,46.54,9,11.6
+acc_y_filtered,2.0,100,2.0,46.54,9,11.6
